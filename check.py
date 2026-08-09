@@ -62,6 +62,32 @@ async def check_speech(session: aiohttp.ClientSession) -> bool:
     return ok
 
 
+async def check_stt(session: aiohttp.ClientSession) -> None:
+    """Пробуем распознать полсекунды тишины — проверяем доступность API, не качество."""
+    import struct
+
+    from services.stt import SttError, stt
+
+    sr, secs = 16000, 1
+    pcm = b"\x00\x00" * sr * secs
+    wav = (
+        b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt "
+        + struct.pack("<IHHIIHH", 16, 1, 1, sr, sr * 2, 2, 16)
+        + b"data" + struct.pack("<I", len(pcm)) + pcm
+    )
+    try:
+        await stt.transcribe(wav, duration_sec=secs)
+        print(f"✅ Azure STT: работает (API: {stt._api})")
+    except SttError as e:
+        # "Речь не распознана" на тишине — это УСПЕХ: API ответил
+        if "не распознана" in str(e):
+            print(f"✅ Azure STT: работает (API: {stt._api})")
+        else:
+            print(f"❌ Azure STT: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ Azure STT: неожиданная ошибка: {e}")
+
+
 async def check_vision(session: aiohttp.ClientSession) -> None:
     from services import vision as vis
 
@@ -144,6 +170,7 @@ async def main() -> int:
         tg = await check_telegram(session)
         sp = await check_speech(session)
         await check_vision(session)
+        await check_stt(session)
         await check_translator(session)
     print("=" * 52)
     if tg and sp and tess:
