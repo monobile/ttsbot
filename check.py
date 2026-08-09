@@ -62,6 +62,35 @@ async def check_speech(session: aiohttp.ClientSession) -> bool:
     return ok
 
 
+async def check_vision(session: aiohttp.ClientSession) -> None:
+    from services import vision as vis
+
+    if not vis.enabled():
+        print("⚠️  Azure Vision: не настроен — OCR только через Tesseract")
+        return
+    print(f"   endpoint: {settings.azure_vision_endpoint}")
+    # 1x1 PNG слишком мал для Vision (минимум 50x50) — рисуем пустой квадрат
+    try:
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (60, 60), "white").save(buf, format="PNG")
+        probe = buf.getvalue()
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ Azure Vision: не удалось создать тестовое изображение: {e}")
+        return
+
+    try:
+        await vis.vision.read_text(probe)
+        print(f"✅ Azure Vision: работает (API: {vis.vision._api})")
+    except vis.VisionError as e:
+        print(f"❌ Azure Vision: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ Azure Vision: неожиданная ошибка: {e}")
+
+
 async def check_translator(session: aiohttp.ClientSession) -> None:
     if not settings.azure_translator_key:
         print("⚠️  Azure Translator: ключ не задан — построчный перевод отключён")
@@ -114,6 +143,7 @@ async def main() -> int:
     async with aiohttp.ClientSession(timeout=timeout) as session:
         tg = await check_telegram(session)
         sp = await check_speech(session)
+        await check_vision(session)
         await check_translator(session)
     print("=" * 52)
     if tg and sp and tess:

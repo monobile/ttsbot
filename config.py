@@ -21,7 +21,11 @@ class Settings:
     azure_speech_region: str
     azure_translator_key: str
     azure_translator_region: str
+    azure_vision_key: str
+    azure_vision_endpoint: str
     tesseract_cmd: str
+    tessdata_dir: str
+    ocr_upscale: int
     max_image_mb: int
     max_tts_chars: int
 
@@ -32,7 +36,20 @@ settings = Settings(
     azure_speech_region=os.getenv("AZURE_SPEECH_REGION", "qatarcentral"),
     azure_translator_key=os.getenv("AZURE_TRANSLATOR_KEY", ""),
     azure_translator_region=os.getenv("AZURE_TRANSLATOR_REGION", "westeurope"),
+    azure_vision_key=os.getenv("AZURE_VISION_KEY", ""),
+    # По умолчанию собирается из региона; можно задать полный URL напрямую
+    azure_vision_endpoint=os.getenv("AZURE_VISION_ENDPOINT")
+    or (
+        f"https://{os.getenv('AZURE_VISION_REGION', 'qatarcentral')}.api.cognitive.microsoft.com"
+        if os.getenv("AZURE_VISION_KEY")
+        else ""
+    ),
     tesseract_cmd=os.getenv("TESSERACT_CMD", "/usr/bin/tesseract"),
+    # Пусто = системная папка tessdata. Задавать только если модели лежат отдельно —
+    # тогда ВСЕ нужные .traineddata должны быть в этой папке, иначе проходы упадут.
+    tessdata_dir=os.getenv("TESSDATA_DIR", ""),
+    # 2400px по длинной стороне: на 1600 арабский распознаётся заметно хуже
+    ocr_upscale=int(os.getenv("OCR_UPSCALE", "2400")),
     max_image_mb=int(os.getenv("MAX_IMAGE_MB", "10")),
     max_tts_chars=int(os.getenv("MAX_TTS_CHARS", "3000")),
 )
@@ -74,4 +91,3 @@ LANGUAGES = {
     },
 }
 
-OCR_ALL_LANGS = "ara+rus+eng"
