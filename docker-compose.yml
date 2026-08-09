@@ -1,0 +1,26 @@
+# Деплой на Hostinger VPS через Docker Compose.
+# Образ собирается прямо из git-репозитория — файлы на сервер копировать не нужно.
+# Замените USERNAME/REPO на свои перед деплоем.
+
+services:
+  bot:
+    build: https://github.com/USERNAME/REPO.git#main
+    container_name: ttsbot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY}
+      AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-qatarcentral}
+      AZURE_TRANSLATOR_KEY: ${AZURE_TRANSLATOR_KEY:-}
+      AZURE_TRANSLATOR_REGION: ${AZURE_TRANSLATOR_REGION:-westeurope}
+      TESSERACT_CMD: /usr/bin/tesseract
+      MAX_IMAGE_MB: "10"
+      MAX_TTS_CHARS: "3000"
+      PYTHONUNBUFFERED: "1"
+    # Портов нет — бот работает через long polling.
+    # Порты 80/443 остаются за проектом raydan.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
