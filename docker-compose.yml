@@ -1,0 +1,49 @@
+# Рабочий compose для Hostinger VPS.
+# ВАЖНО: панель Hostinger не выполняет `build:` — поэтому берём готовый образ
+# python:3.12-slim, а код клонируем из репозитория при старте контейнера.
+# Плюс: обновление = git push + перезапуск проекта, пересборка образа не нужна.
+
+services:
+  bot:
+    image: python:3.12-slim
+    container_name: ttsbot
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY}
+      AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION}
+      AZURE_TRANSLATOR_KEY: ${AZURE_TRANSLATOR_KEY}
+      AZURE_TRANSLATOR_REGION: ${AZURE_TRANSLATOR_REGION}
+      REPO_URL: https://github.com/monobile/ttsbot.git
+      REPO_REF: main
+      TESSERACT_CMD: /usr/bin/tesseract
+      MAX_IMAGE_MB: "10"
+      MAX_TTS_CHARS: "3000"
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - >-
+        set -e;
+        if ! command -v tesseract >/dev/null 2>&1; then
+        echo "[init] installing git + tesseract...";
+        apt-get update -qq;
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends
+        git tesseract-ocr tesseract-ocr-ara tesseract-ocr-rus tesseract-ocr-eng;
+        fi;
+        echo "[init] cloning $$REPO_URL ($$REPO_REF)...";
+        rm -rf /app/src;
+        git clone --depth 1 -b "$$REPO_REF" "$$REPO_URL" /app/src;
+        echo "[init] installing python deps...";
+        pip install --no-cache-dir -q -r /app/src/requirements.txt;
+        echo "[init] preflight:";
+        cd /app/src;
+        python check.py || echo "[warn] check.py reported problems, starting anyway";
+        echo "[init] starting bot...";
+        exec python bot.py
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
