@@ -19,7 +19,7 @@ from handlers.ui import (
     lang_keyboard,
     main_menu,
 )
-from services import ocr, translate
+from services import ocr, recognize, translate
 from services.tts import TtsError, tts
 
 log = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ async def handle_image(message: Message, state: FSMContext) -> None:
         hint = data.get("lang")
         hint = None if hint in (None, "auto") else hint
 
-        text, lang = ocr.extract_text(raw, hint)
+        text, lang, engine = await recognize.recognize(raw, hint)
     except ocr.OcrError as e:
         await status.edit_text(f"❌ {e}")
         return
@@ -113,7 +113,7 @@ async def handle_image(message: Message, state: FSMContext) -> None:
 
     await state.update_data(last_text=text, last_lang=lang)
     await status.edit_text(
-        f"<b>Распознано</b> ({LANGUAGES[lang]['name']}):\n\n"
+        f"<b>Распознано</b> ({LANGUAGES[lang]['name']}, {engine}):\n\n"
         f"<pre>{html.escape(text[:3500])}</pre>",
         reply_markup=after_ocr_keyboard(),
     )
@@ -199,8 +199,11 @@ async def handle_free_text(message: Message, state: FSMContext) -> None:
 # ---- Вспомогательное ------------------------------------------------------
 async def _send_voice(message: Message, text: str, lang: str, extra_kb: bool = False) -> None:
     status = await message.answer("🔊 Озвучиваю…")
+    # Арабский: снимаем огласовки. Tesseract часто ставит харакат неверно,
+    # а голос ar-SA расставляет огласовки сам — неверный харакат портит озвучку.
+    tts_text = ocr.strip_harakat(text) if lang == "ar" else text
     try:
-        audio = await tts.synthesize(text, lang)
+        audio = await tts.synthesize(tts_text, lang)
     except TtsError as e:
         await status.edit_text(f"❌ {e}")
         return
