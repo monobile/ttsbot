@@ -11,6 +11,7 @@ from config import LANGUAGES
 from handlers.ui import (
     BTN_LANG,
     BTN_PHOTO,
+    BTN_VOICE,
     BTN_TEXT,
     BTN_TRANSLATE,
     Flow,
@@ -20,6 +21,7 @@ from handlers.ui import (
     main_menu,
 )
 from services import ocr, recognize, translate
+from services.stt import SttError, stt
 from services.tts import TtsError, tts
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ WELCOME = (
     "<b>Бот озвучки и перевода</b>\n\n"
     "Что умею:\n"
     "• 🖼 Распознаю текст с фото и озвучиваю его\n"
+    "• 🎧 Расшифровываю голосовые сообщения в текст\n"
     "• 🔊 Озвучиваю присланный текст\n"
     "• 🌐 Перевожу построчно — оригинал и перевод рядом\n\n"
     "Языки: арабский, английский, русский, чеченский.\n"
@@ -62,7 +65,10 @@ async def set_lang(cb: CallbackQuery, state: FSMContext) -> None:
     label = "автоопределение" if code == "auto" else LANGUAGES[code]["name"]
     note = ""
     if code != "auto" and LANGUAGES[code].get("approx_tts"):
-        note = "\n\n⚠️ Для чеченского используется русский голос — звучит с акцентом, но разборчиво."
+        note = (
+            "\n\n⚠️ Чеченский: озвучка русским голосом (с акцентом, но разборчиво). "
+            "Распознавание речи и перевод для чеченского недоступны."
+        )
     await cb.message.edit_text(f"Готово. Режим озвучки: <b>{label}</b>{note}")
     await cb.answer()
 
@@ -71,6 +77,15 @@ async def set_lang(cb: CallbackQuery, state: FSMContext) -> None:
 async def ask_photo(message: Message, state: FSMContext) -> None:
     await state.set_state(Flow.idle)
     await message.answer("Пришлите фото с текстом 📷\n\nЛучше всего: хороший свет, страница целиком, без наклона.")
+
+
+@router.message(F.text == BTN_VOICE)
+async def ask_voice(message: Message, state: FSMContext) -> None:
+    await state.set_state(Flow.idle)
+    await message.answer(
+        "Запишите или пришлите голосовое сообщение 🎤\n\n"
+        "Языки: арабский, русский, английский. Чеченский распознавание речи не поддерживает."
+    )
 
 
 @router.message(F.text == BTN_TEXT)
@@ -83,6 +98,38 @@ async def ask_text(message: Message, state: FSMContext) -> None:
 async def ask_translate(message: Message, state: FSMContext) -> None:
     await state.set_state(Flow.await_text_for_translate)
     await message.answer("Пришлите текст — переведу построчно.")
+
+
+# ---- Голосовое / аудио → текст --------------------------------------------
+@router.message(F.voice | F.audio | (F.document & F.document.mime_type.startswith("audio/")))
+async def handle_voice(message: Message, state: FSMContext) -> None:
+    media = message.voice or message.audio or message.document
+    duration = getattr(media, "duration", 0) or 0
+
+    status = await message.answer("🎧 Распознаю речь…")
+    try:
+        buf = await message.bot.download(media.file_id)
+        audio = buf.read()
+
+        data = await state.get_data()
+        hint = data.get("lang")
+        hint = None if hint in (None, "auto") else hint
+
+        text, lang = await stt.transcribe(audio, duration, hint)
+    except SttError as e:
+        await status.edit_text(f"❌ {e}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("STT pipeline failed")
+        await status.edit_text("❌ Не удалось обработать аудио. Попробуйте другую запись.")
+        return
+
+    await state.update_data(last_text=text, last_lang=lang)
+    await status.edit_text(
+        f"<b>Расшифровка</b> ({LANGUAGES[lang]['name']}):\n\n"
+        f"<pre>{html.escape(text[:3500])}</pre>",
+        reply_markup=after_ocr_keyboard(),
+    )
 
 
 # ---- Фото → OCR → озвучка -------------------------------------------------

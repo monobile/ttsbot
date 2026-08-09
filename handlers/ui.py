@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from config import LANGUAGES
 
 BTN_PHOTO = "🖼 Фото → текст + озвучка"
+BTN_VOICE = "🎧 Голосовое → текст"
 BTN_TEXT = "🔊 Текст → озвучка"
 BTN_TRANSLATE = "🌐 Построчный перевод"
 BTN_LANG = "⚙️ Язык озвучки"
@@ -20,7 +21,7 @@ class Flow(StatesGroup):
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_PHOTO)],
+            [KeyboardButton(text=BTN_PHOTO), KeyboardButton(text=BTN_VOICE)],
             [KeyboardButton(text=BTN_TEXT), KeyboardButton(text=BTN_TRANSLATE)],
             [KeyboardButton(text=BTN_LANG)],
         ],
