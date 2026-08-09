@@ -1,4 +1,12 @@
-"""OCR через Tesseract + эвристическое определение языка."""
+"""OCR через Tesseract.
+
+Ключевой принцип: НИКОГДА не запускать Tesseract в многоязычном режиме
+с арабским вместе с латиницей/кириллицей. Модели конкурируют за глифы
+и на выходе получается мусор вида "Baal Glas" внутри арабского текста.
+
+Поэтому: сначала определяем письменность (OSD), потом распознаём
+одним подходящим набором языков.
+"""
 import io
 import logging
 import re
@@ -6,7 +14,7 @@ import re
 import pytesseract
 from PIL import Image, ImageOps
 
-from config import OCR_ALL_LANGS, settings
+from config import settings
 
 log = logging.getLogger(__name__)
 pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
@@ -21,9 +29,21 @@ _CHECHEN_WORDS = {
     "цуьнан", "цара", "уьш", "хьо", "кхин", "дерриг", "дукха", "хӀинца",
     "мукъалахь", "ненан", "гур", "хила", "хилла", "болу", "йолу", "долу",
 }
+
 _ARABIC = re.compile(r"[\u0600-\u06FF\u0750-\u077F]")
 _CYRILLIC = re.compile(r"[\u0400-\u04FF]")
 _LATIN = re.compile(r"[A-Za-z]")
+
+# Огласовки (харакат) и татвиль — снимаются перед озвучкой, см. strip_harakat
+_HARAKAT = re.compile(r"[\u064B-\u0652\u0670\u06D6-\u06ED\u0640]")
+_BIDI_MARKS = re.compile(r"[\u200e\u200f\u202a-\u202e]")
+
+# Наборы языков по письменности. Арабский — всегда ОДИН, без примесей.
+_SCRIPT_LANGS = {
+    "Arabic": "ara",
+    "Cyrillic": "rus+eng",
+    "Latin": "eng+rus",
+}
 
 
 class OcrError(Exception):
@@ -31,17 +51,73 @@ class OcrError(Exception):
 
 
 def _preprocess(raw: bytes) -> Image.Image:
-    """Лёгкая предобработка — заметно поднимает качество на фото с телефона."""
+    """Предобработка. Апскейл до 2400px по длинной стороне — на 1600 качество заметно хуже."""
     img = Image.open(io.BytesIO(raw))
     img = ImageOps.exif_transpose(img)
-    img = img.convert("L")            # градации серого
-    img = ImageOps.autocontrast(img)  # выравнивание контраста
-    # Апскейл мелких изображений — Tesseract любит ~300 dpi
+    img = img.convert("L")
+    img = ImageOps.autocontrast(img)
     w, h = img.size
-    if max(w, h) < 1600:
-        scale = 1600 / max(w, h)
+    target = settings.ocr_upscale
+    if max(w, h) < target:
+        scale = target / max(w, h)
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     return img
+
+
+def _tess_config(psm: int = 6) -> str:
+    cfg = f"--psm {psm}"
+    if settings.tessdata_dir:
+        cfg += f" --tessdata-dir {settings.tessdata_dir}"
+    return cfg
+
+
+def _detect_script(img: Image.Image) -> str | None:
+    """Определяет письменность через OSD Tesseract. Возвращает 'Arabic'/'Cyrillic'/'Latin'."""
+    try:
+        osd = pytesseract.image_to_osd(img)
+    except Exception as e:  # noqa: BLE001
+        log.warning("OSD failed: %s", e)
+        return None
+    script, conf = None, 0.0
+    for line in osd.splitlines():
+        if line.startswith("Script:"):
+            script = line.split(":", 1)[1].strip()
+        elif line.startswith("Script confidence:"):
+            try:
+                conf = float(line.split(":", 1)[1])
+            except ValueError:
+                pass
+    log.info("OSD script=%s confidence=%.2f", script, conf)
+    # Низкая уверенность — не доверяем, уйдём в перебор вариантов
+    if script and conf >= 5.0:
+        return script
+    return None
+
+
+def _score(text: str, langs: str) -> int:
+    """Сколько символов ожидаемой письменности распознано минус штраф за чужие."""
+    arb = len(_ARABIC.findall(text))
+    cyr = len(_CYRILLIC.findall(text))
+    lat = len(_LATIN.findall(text))
+    if langs == "ara":
+        return arb - 2 * (cyr + lat)
+    return cyr + lat - 2 * arb
+
+
+def _best_effort_ocr(img: Image.Image) -> tuple[str, str]:
+    """OSD не сработал: пробуем арабский и латиницу/кириллицу, выбираем по счёту."""
+    results = []
+    for langs in ("ara", "rus+eng"):
+        try:
+            text = pytesseract.image_to_string(img, lang=langs, config=_tess_config())
+        except pytesseract.TesseractError:
+            continue
+        results.append((_score(text, langs), langs, text))
+    if not results:
+        raise OcrError("Ошибка распознавания. Проверьте языковые пакеты Tesseract.")
+    results.sort(reverse=True, key=lambda r: r[0])
+    log.info("best-effort OCR scores: %s", [(r[1], r[0]) for r in results])
+    return results[0][2], results[0][1]
 
 
 def detect_language(text: str) -> str:
@@ -53,7 +129,6 @@ def detect_language(text: str) -> str:
     cyr = len(_CYRILLIC.findall(text))
     lat = len(_LATIN.findall(text))
     if cyr > lat:
-        # Чеченский пишется кириллицей — отличаем по спецсимволам и диграфам
         markers = len(_CHECHEN_MARKERS.findall(text))
         if markers >= 1 or "Ӏ" in text or "ӏ" in text:
             return "ce"
@@ -65,11 +140,20 @@ def detect_language(text: str) -> str:
     return "en"
 
 
+def strip_harakat(text: str) -> str:
+    """Снимает огласовки и bidi-метки.
+
+    Зачем: Tesseract на полностью огласованном тексте (مُشَكَّل) часто ставит
+    харакат неверно, а голос Azure ar-SA расставляет огласовки сам.
+    Неверный харакат из OCR активно портит озвучку — лучше его убрать.
+    """
+    text = _HARAKAT.sub("", text)
+    text = _BIDI_MARKS.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", text)
+
+
 def extract_text(raw: bytes, lang_hint: str | None = None) -> tuple[str, str]:
-    """
-    Распознаёт текст на изображении.
-    Возвращает (текст, определённый_код_языка).
-    """
+    """Распознаёт текст. Возвращает (текст, код языка)."""
     from config import LANGUAGES
 
     if len(raw) > settings.max_image_mb * 1024 * 1024:
@@ -80,35 +164,42 @@ def extract_text(raw: bytes, lang_hint: str | None = None) -> tuple[str, str]:
     except Exception as e:  # noqa: BLE001
         raise OcrError("Не удалось открыть изображение. Пришлите JPG или PNG.") from e
 
-    langs = OCR_ALL_LANGS
     if lang_hint and lang_hint in LANGUAGES:
-        # Явная подсказка — сначала нужный язык, остальные как подстраховка
-        primary = LANGUAGES[lang_hint]["tesseract"]
-        langs = f"{primary}+{OCR_ALL_LANGS}"
-
-    try:
-        text = pytesseract.image_to_string(img, lang=langs, config="--psm 3")
-    except pytesseract.TesseractError as e:
-        log.exception("Tesseract failed")
-        raise OcrError("Ошибка распознавания. Проверьте установку языковых пакетов Tesseract.") from e
-    except pytesseract.TesseractNotFoundError as e:
-        raise OcrError("Tesseract не найден на сервере. Установите его (см. README).") from e
+        # Явное указание пользователя важнее автоматики
+        langs = "ara" if lang_hint == "ar" else "rus+eng"
+        try:
+            text = pytesseract.image_to_string(img, lang=langs, config=_tess_config())
+        except pytesseract.TesseractNotFoundError as e:
+            raise OcrError("Tesseract не найден на сервере.") from e
+        except pytesseract.TesseractError as e:
+            raise OcrError("Ошибка распознавания.") from e
+    else:
+        script = _detect_script(img)
+        if script in _SCRIPT_LANGS:
+            langs = _SCRIPT_LANGS[script]
+            try:
+                text = pytesseract.image_to_string(img, lang=langs, config=_tess_config())
+            except pytesseract.TesseractNotFoundError as e:
+                raise OcrError("Tesseract не найден на сервере.") from e
+            except pytesseract.TesseractError:
+                text, langs = _best_effort_ocr(img)
+        else:
+            text, langs = _best_effort_ocr(img)
 
     text = _cleanup(text)
     if len(text.strip()) < 2:
         raise OcrError(
             "Текст на изображении не распознан.\n\n"
-            "Попробуйте: снимок при хорошем свете, страница целиком в кадре, без наклона и блика."
+            "Попробуйте: хороший свет, страница целиком в кадре, без наклона и блика."
         )
 
     return text, (lang_hint or detect_language(text))
 
 
 def _cleanup(text: str) -> str:
-    """Убираем мусорные символы и лишние пустые строки."""
     lines = []
     for line in text.splitlines():
-        line = line.strip()
+        line = _BIDI_MARKS.sub("", line).strip()
         line = re.sub(r"[|_~^`]{2,}", "", line)
         if line:
             lines.append(line)
@@ -116,13 +207,11 @@ def _cleanup(text: str) -> str:
 
 
 def split_lines(text: str) -> list[str]:
-    """Разбивка на смысловые строки для построчного перевода."""
     chunks: list[str] = []
     for raw_line in text.splitlines():
         raw_line = raw_line.strip()
         if not raw_line:
             continue
-        # Длинные абзацы дробим по знакам конца предложения (в т.ч. арабским)
         if len(raw_line) > 200:
             parts = re.split(r"(?<=[.!?؟।])\s+", raw_line)
             chunks.extend(p.strip() for p in parts if p.strip())
